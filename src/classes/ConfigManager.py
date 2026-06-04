@@ -43,6 +43,9 @@ class tools:
             else:
                 os.remove(f)
 
+    def _is_interactive(self):
+        return sys.stdin.isatty() and not os.environ.get('SCREENIPY_DOCKER', '').upper() == 'TRUE'
+
     # Handle user input and save config
 
     def setConfig(self, parser, default=False, showFileCreatedText=True):
@@ -69,14 +72,16 @@ class tools:
                         '[+] Default configuration generated as user configuration is not found!' + colorText.END)
                     print(colorText.BOLD + colorText.GREEN +
                         '[+] Use Option > 5 to edit in future.' + colorText.END)
-                    print(colorText.BOLD + colorText.GREEN +
-                        '[+] Close and Restart the program now.' + colorText.END)
-                    input('')
-                    sys.exit(0)
+                    if self._is_interactive():
+                        print(colorText.BOLD + colorText.GREEN +
+                            '[+] Close and Restart the program now.' + colorText.END)
+                        input('')
+                        sys.exit(0)
             except IOError:
                 print(colorText.BOLD + colorText.FAIL +
                       '[+] Failed to save user config. Exiting..' + colorText.END)
-                input('')
+                if self._is_interactive():
+                    input('')
                 sys.exit(1)
         else:
             parser = configparser.ConfigParser(strict=False)
@@ -131,46 +136,44 @@ class tools:
                       '[+] User configuration saved.' + colorText.END)
                 print(colorText.BOLD + colorText.GREEN +
                       '[+] Restart the Program to start Screening...' + colorText.END)
-                input('')
+                if self._is_interactive():
+                    input('')
                 sys.exit(0)
             except IOError:
                 print(colorText.BOLD + colorText.FAIL +
                       '[+] Failed to save user config. Exiting..' + colorText.END)
-                input('')
+                if self._is_interactive():
+                    input('')
                 sys.exit(1)
+
+    def _parse_config(self, parser):
+        self.duration = parser.get('config', 'duration')
+        self.period = parser.get('config', 'period')
+        self.minLTP = float(parser.get('config', 'minprice'))
+        self.maxLTP = float(parser.get('config', 'maxprice'))
+        self.volumeRatio = float(parser.get('config', 'volumeRatio'))
+        self.consolidationPercentage = float(
+            parser.get('config', 'consolidationPercentage'))
+        self.daysToLookback = int(
+            parser.get('config', 'daysToLookback'))
+        self.shuffleEnabled = 'n' not in str(parser.get('config', 'shuffle')).lower()
+        self.cacheEnabled = 'n' not in str(parser.get('config', 'cachestockdata')).lower()
+        self.stageTwo = 'n' not in str(parser.get('config', 'onlyStageTwoStocks')).lower()
+        self.useEMA = 'y' in str(parser.get('config', 'useEMA')).lower()
 
     # Load user config from file
     def getConfig(self, parser):
-        if len(parser.read('screenipy.ini')):
-            try:
-                self.duration = parser.get('config', 'duration')
-                self.period = parser.get('config', 'period')
-                self.minLTP = float(parser.get('config', 'minprice'))
-                self.maxLTP = float(parser.get('config', 'maxprice'))
-                self.volumeRatio = float(parser.get('config', 'volumeRatio'))
-                self.consolidationPercentage = float(
-                    parser.get('config', 'consolidationPercentage'))
-                self.daysToLookback = int(
-                    parser.get('config', 'daysToLookback'))
-                if 'n' not in str(parser.get('config', 'shuffle')).lower():
-                    self.shuffleEnabled = True
-                if 'n' not in str(parser.get('config', 'cachestockdata')).lower():
-                    self.cacheEnabled = True
-                if 'n' not in str(parser.get('config', 'onlyStageTwoStocks')).lower():
-                    self.stageTwo = True
-                else:
-                    self.stageTwo = False
-                if 'y' not in str(parser.get('config', 'useEMA')).lower():
-                    self.useEMA = False
-                else:
-                    self.useEMA = True
-            except configparser.NoOptionError:
-                input(colorText.BOLD + colorText.FAIL +
-                      '[+] Screenipy requires user configuration again. Press enter to continue..' + colorText.END)
-                parser.remove_section('config')
-                self.setConfig(parser, default=False)
-        else:
+        if not len(parser.read('screenipy.ini')):
             self.setConfig(parser, default=True)
+            parser.read('screenipy.ini')
+        try:
+            self._parse_config(parser)
+        except configparser.NoOptionError:
+            msg = '[+] Screenipy requires user configuration again. Press enter to continue..'
+            if self._is_interactive():
+                input(colorText.BOLD + colorText.FAIL + msg + colorText.END)
+            parser.remove_section('config')
+            self.setConfig(parser, default=False)
 
     # Print config file
     def showConfigFile(self):
@@ -180,7 +183,8 @@ class tools:
                   '[+] Screeni-py User Configuration:' + colorText.END)
             print("\n"+f.read())
             f.close()
-            input('')
+            if self._is_interactive():
+                input('')
         except:
             print(colorText.BOLD + colorText.FAIL +
                   "[+] User Configuration not found!" + colorText.END)
