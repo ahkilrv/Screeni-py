@@ -29,6 +29,10 @@ from tabulate import tabulate
 import multiprocessing
 multiprocessing.freeze_support()
 try:
+    multiprocessing.set_start_method('fork', force=True)
+except RuntimeError:
+    pass
+try:
     import chromadb
     CHROMA_AVAILABLE = True
 except:
