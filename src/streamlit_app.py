@@ -356,6 +356,8 @@ def on_start_button_click():
             screenipy_main(execute_inputs=execute_inputs, isDevVersion=isDevVersion, backtestDate=backtestDate)
         except StopIteration:
             pass
+        except (EOFError, OSError):
+            pass
         except requests.exceptions.RequestException:
             os.environ['SCREENIPY_REQ_ERROR'] = "TRUE"
 
