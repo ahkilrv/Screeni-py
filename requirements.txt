@@ -65,3 +65,4 @@ mplfinance>=0.12.9b7
 num2words
 ta
 # advanced-ta (excluded from requirements.txt, installed via --no-deps)
+psycopg2-binary

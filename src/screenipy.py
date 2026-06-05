@@ -18,6 +18,7 @@ from classes.CandlePatterns import CandlePatterns
 from classes.ParallelProcessing import StockConsumer
 from classes.Changelog import VERSION
 from classes.Utility import isDocker, isGui
+from classes.Database import get_dsn
 from alive_progress import alive_bar
 import argparse
 import urllib
@@ -56,9 +57,7 @@ np.seterr(divide='ignore', invalid='ignore')
 # Global Variabls
 screenCounter = None
 screenResultsCounter = None
-stockDict = None
 keyboardInterruptEvent = None
-loadedStockData = False
 loadCount = 0
 maLength = None
 newlyListedOnly = False
@@ -177,14 +176,11 @@ def initExecution():
 
 # Main function
 def main(testing=False, testBuild=False, downloadOnly=False, execute_inputs:list = [], isDevVersion=None, backtestDate=date.today()):
-    global screenCounter, screenResultsCounter, stockDict, loadedStockData, keyboardInterruptEvent, loadCount, maLength, newlyListedOnly, vectorSearch
+    global screenCounter, screenResultsCounter, keyboardInterruptEvent, loadCount, maLength, newlyListedOnly, vectorSearch
     screenCounter = multiprocessing.Value('i', 1)
     screenResultsCounter = multiprocessing.Value('i', 0)
-    keyboardInterruptEvent = multiprocessing.Manager().Event()
-
-    if stockDict is None or Utility.tools.isBacktesting(backtestDate=backtestDate):
-        stockDict = multiprocessing.Manager().dict()
-        loadCount = 0
+    keyboardInterruptEvent = multiprocessing.Event()
+    loadCount = 0
 
     minRSI = 0
     maxRSI = 100
@@ -353,10 +349,7 @@ def main(testing=False, testBuild=False, downloadOnly=False, execute_inputs:list
                 input('')
             sys.exit(0)
 
-        if not Utility.tools.isTradingTime() and configManager.cacheEnabled and not loadedStockData and not testing and not Utility.tools.isBacktesting(backtestDate=backtestDate):
-            Utility.tools.loadStockData(stockDict, configManager, proxyServer)
-            loadedStockData = True
-        loadCount = len(stockDict)
+        db_dsn = get_dsn()
 
         print(colorText.BOLD + colorText.WARN +
               "[+] Starting Stock Screening.. Press Ctrl+C to stop!\n")
@@ -373,7 +366,7 @@ def main(testing=False, testBuild=False, downloadOnly=False, execute_inputs:list
             totalConsumers = 2      # This is required for single core machine
         if configManager.cacheEnabled is True and multiprocessing.cpu_count() > 2:
             totalConsumers -= 1
-        consumers = [StockConsumer(tasks_queue, results_queue, screenCounter, screenResultsCounter, stockDict, proxyServer, keyboardInterruptEvent)
+        consumers = [StockConsumer(tasks_queue, results_queue, screenCounter, screenResultsCounter, db_dsn, proxyServer, keyboardInterruptEvent)
                      for _ in range(totalConsumers)]
 
         for worker in consumers:
@@ -479,12 +472,6 @@ def main(testing=False, testBuild=False, downloadOnly=False, execute_inputs:list
 
         print(colorText.BOLD + colorText.GREEN +
                   f"[+] Found {len(screenResults)} Stocks." + colorText.END)
-        if configManager.cacheEnabled and not Utility.tools.isTradingTime() and not testing and not Utility.tools.isBacktesting(backtestDate=backtestDate):
-            print(colorText.BOLD + colorText.GREEN +
-                  "[+] Caching Stock Data for future use, Please Wait... " + colorText.END, end='')
-            Utility.tools.saveStockData(
-                stockDict, configManager, loadCount)
-
         Utility.tools.setLastScreenedResults(screenResults)
         Utility.tools.setLastScreenedResults(saveResults, unformatted=True)
         if not testBuild and not downloadOnly:

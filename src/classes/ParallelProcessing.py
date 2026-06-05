@@ -1,4 +1,3 @@
-
 '''
  *  Project             :   Screenipy
  *  Author              :   Pranjal Joshi, Swar Patel
@@ -22,29 +21,26 @@ from copy import deepcopy
 from classes.CandlePatterns import CandlePatterns
 from classes.ColorText import colorText
 from classes.SuppressOutput import SuppressOutput
-
-# NOTE: Private multiprocessing.popen_* submodule imports removed.
-# The _Popen override below was a PyInstaller 2.x/3.x workaround that
-# has been unnecessary since PyInstaller 4+. Modern Python 3.13 does not
-# expose these private modules as stable API.
+from classes.Database import ScreeniDatabase
 
 
 class StockConsumer(multiprocessing.Process):
 
-    def __init__(self, task_queue, result_queue, screenCounter, screenResultsCounter, stockDict, proxyServer, keyboardInterruptEvent):
+    def __init__(self, task_queue, result_queue, screenCounter, screenResultsCounter, db_dsn, proxyServer, keyboardInterruptEvent):
         multiprocessing.Process.__init__(self)
         self.multiprocessingForWindows()
         self.task_queue = task_queue
         self.result_queue = result_queue
         self.screenCounter = screenCounter
         self.screenResultsCounter = screenResultsCounter
-        self.stockDict = stockDict
+        self.db_dsn = db_dsn
+        self.db = None
         self.proxyServer = proxyServer
         self.keyboardInterruptEvent = keyboardInterruptEvent
         self.isTradingTime = Utility.tools.isTradingTime()
 
     def run(self):
-        # while True:
+        self.db = ScreeniDatabase(dsn=self.db_dsn)
         try:
             while not self.keyboardInterruptEvent.is_set():
                 try:
@@ -72,14 +68,15 @@ class StockConsumer(multiprocessing.Process):
         try:
             period = configManager.period
 
-            # Data download adjustment for Newly Listed only feature
             if newlyListedOnly:
                 if int(configManager.period[:-1]) > 250:
                     period = '250d'
                 else:
                     period = configManager.period
 
-            if (self.stockDict.get(stock) is None) or (configManager.cacheEnabled is False) or self.isTradingTime or downloadOnly:
+            cached_data = self.db.get_cached_stock_data(stock)
+
+            if (cached_data is None) or (configManager.cacheEnabled is False) or self.isTradingTime or downloadOnly:
                 try:
                     data, backtestReport = fetcher.fetchStockData(stock,
                                                 period,
@@ -92,11 +89,13 @@ class StockConsumer(multiprocessing.Process):
                                                 tickerOption=tickerOption)
                 except Exception as e:
                     return screeningDictionary, saveDictionary
-                if configManager.cacheEnabled is True and not self.isTradingTime and (self.stockDict.get(stock) is None) or downloadOnly:
-                    self.stockDict[stock] = data.to_dict('split')
+                if configManager.cacheEnabled is True and not self.isTradingTime:
+                    self.db.cache_stock_data(stock, data)
                     if downloadOnly:
                         raise Screener.DownloadDataOnly
             else:
+                data = cached_data
+
                 if printCounter:
                     try:
                         print(colorText.BOLD + colorText.GREEN + ("[%d%%] Screened %d, Found %d. Fetching data & Analyzing %s..." % (
@@ -106,13 +105,10 @@ class StockConsumer(multiprocessing.Process):
                     except ZeroDivisionError:
                         pass
                     sys.stdout.write("\r\033[K")
-                data = self.stockDict.get(stock)
-                data = pd.DataFrame(
-                    data['data'], columns=data['columns'], index=data['index'])
 
             fullData, processedData = screener.preprocessData(
                 data, daysToLookback=configManager.daysToLookback)
-            
+
             if type(vectorSearch) != bool and type(vectorSearch) and vectorSearch[2] == True:
                 executeOption = 0
                 with self.screenCounter.get_lock():
@@ -168,7 +164,7 @@ class StockConsumer(multiprocessing.Process):
                 with SuppressOutput(suppress_stderr=True, suppress_stdout=True):
                     isCandlePattern = candlePatterns.findPattern(
                         processedData, screeningDictionary, saveDictionary)
-                
+
                 isConfluence = False
                 isInsideBar = False
                 isIpoBase = False
@@ -184,9 +180,9 @@ class StockConsumer(multiprocessing.Process):
                         isNR = screener.validateNarrowRange(processedData, screeningDictionary, saveDictionary, nr=maLength)
                     else:
                         isNR = screener.validateNarrowRange(processedData, screeningDictionary, saveDictionary)
-                
+
                 isMomentum = screener.validateMomentum(processedData, screeningDictionary, saveDictionary)
-                
+
                 isVSA = False
                 if not (executeOption == 7 and respChartPattern < 3):
                     isVSA = screener.validateVolumeSpreadAnalysis(processedData, screeningDictionary, saveDictionary)
@@ -269,7 +265,6 @@ class StockConsumer(multiprocessing.Process):
                             self.screenResultsCounter.value += 1
                             return screeningDictionary, saveDictionary
         except KeyboardInterrupt:
-            # Capturing Ctr+C Here isn't a great idea
             pass
         except Fetcher.StockDataEmptyException:
             pass
@@ -289,6 +284,4 @@ class StockConsumer(multiprocessing.Process):
         return
 
     def multiprocessingForWindows(self):
-        # PyInstaller _MEIPASS2 workaround is no longer needed with
-        # PyInstaller 4+ and Python 3.13; private forking submodule removed.
         pass

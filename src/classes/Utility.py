@@ -132,92 +132,10 @@ class tools:
         return ((openTime <= curr <= closeTime) and (0 <= curr.weekday() <= 4))
 
     def saveStockData(stockDict, configManager, loadCount):
-        curr = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
-        openTime = curr.replace(hour=9, minute=15)
-        cache_date = datetime.date.today()  # for monday to friday
-        weekday = datetime.date.today().weekday()
-        if curr < openTime:  # for monday to friday before 9:15
-            cache_date = datetime.datetime.today() - datetime.timedelta(1)
-        if weekday == 0 and curr < openTime:  # for monday before 9:15
-            cache_date = datetime.datetime.today() - datetime.timedelta(3)
-        if weekday == 5 or weekday == 6:  # for saturday and sunday
-            cache_date = datetime.datetime.today() - datetime.timedelta(days=weekday - 4)
-        cache_date = cache_date.strftime("%d%m%y")
-        cache_file = "stock_data_" + str(cache_date) + ".pkl"
-        configManager.deleteStockData(excludeFile=cache_file)
-
-        if not os.path.exists(cache_file) or len(stockDict) > (loadCount+1):
-            with open(cache_file, 'wb') as f:
-                try:
-                    pickle.dump(stockDict.copy(), f)
-                    print(colorText.BOLD + colorText.GREEN +
-                          "=> Done." + colorText.END)
-                except pickle.PicklingError:
-                    print(colorText.BOLD + colorText.FAIL +
-                          "=> Error while Caching Stock Data." + colorText.END)
-        else:
-            print(colorText.BOLD + colorText.GREEN +
-                  "=> Already Cached." + colorText.END)
+        pass  # Deprecated: stock caching now uses Postgres via ScreeniDatabase
 
     def loadStockData(stockDict, configManager, proxyServer=None):
-        curr = datetime.datetime.now(pytz.timezone('Asia/Kolkata'))
-        openTime = curr.replace(hour=9, minute=15)
-        last_cached_date = datetime.date.today()  # for monday to friday after 3:30
-        weekday = datetime.date.today().weekday()
-        if curr < openTime:  # for monday to friday before 9:15
-            last_cached_date = datetime.datetime.today() - datetime.timedelta(1)
-        if weekday == 5 or weekday == 6:  # for saturday and sunday
-            last_cached_date = datetime.datetime.today() - datetime.timedelta(days=weekday - 4)
-        if weekday == 0 and curr < openTime:  # for monday before 9:15
-            last_cached_date = datetime.datetime.today() - datetime.timedelta(3)
-        last_cached_date = last_cached_date.strftime("%d%m%y")
-        cache_file = "stock_data_" + str(last_cached_date) + ".pkl"
-        if os.path.exists(cache_file):
-            with open(cache_file, 'rb') as f:
-                try:
-                    stockData = pickle.load(f)
-                    print(colorText.BOLD + colorText.GREEN +
-                          "[+] Automatically Using Cached Stock Data due to After-Market hours!" + colorText.END)
-                    for stock in stockData:
-                        stockDict[stock] = stockData.get(stock)
-                except pickle.UnpicklingError:
-                    print(colorText.BOLD + colorText.FAIL +
-                          "[+] Error while Reading Stock Cache." + colorText.END)
-                except EOFError:
-                    print(colorText.BOLD + colorText.FAIL +
-                          "[+] Stock Cache Corrupted." + colorText.END)
-        elif ConfigManager.default_period == configManager.period and ConfigManager.default_duration == configManager.duration:
-            cache_url = "https://raw.github.com/pranjal-joshi/Screeni-py/actions-data-download/actions-data-download/" + cache_file
-            if proxyServer is not None:
-                resp = requests.get(cache_url, stream=True, proxies={'https':proxyServer})
-            else:
-                resp = requests.get(cache_url, stream=True)
-            if resp.status_code == 200:
-                print(colorText.BOLD + colorText.FAIL +
-                      "[+] After-Market Stock Data is not cached.." + colorText.END)
-                print(colorText.BOLD + colorText.GREEN +
-                      "[+] Downloading cache from Screenipy server for faster processing, Please Wait.." + colorText.END)
-                try:
-                    chunksize = 1024*1024*1
-                    filesize = int(int(resp.headers.get('content-length'))/chunksize)
-                    bar, spinner = tools.getProgressbarStyle()
-                    f = open(cache_file, 'wb')
-                    dl = 0
-                    with alive_bar(filesize, bar=bar, spinner=spinner, manual=True) as progressbar:
-                        for data in resp.iter_content(chunk_size=chunksize):
-                            dl += 1
-                            f.write(data)
-                            progressbar(dl/filesize)
-                            if dl >= filesize:
-                                progressbar(1.0)
-                    f.close()
-                except Exception as e:
-                    print("[!] Download Error - " + str(e))
-                print("")
-                tools.loadStockData(stockDict, configManager, proxyServer)
-            else:
-                print(colorText.BOLD + colorText.FAIL +
-                      "[+] Cache unavailable on Screenipy server, Continuing.." + colorText.END)
+        pass  # Deprecated: stock caching now uses Postgres via ScreeniDatabase
 
     # Save screened results to excel
     def promptSaveResults(df):

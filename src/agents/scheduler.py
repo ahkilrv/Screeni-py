@@ -3,12 +3,13 @@ Scheduler for Screeni-py Agent Harness.
 APScheduler-based scheduled runs for automated stock screening.
 Supports cron-style schedules from screenipy.yaml.
 Heartbeat: pings Kite MCP every 5 minutes to verify connectivity.
+Uses Postgres for persistence (DATABASE_URL env var).
 """
 import asyncio
 import logging
 import os
 import sys
-import sqlite3
+import psycopg2
 from datetime import datetime
 from typing import Optional
 
@@ -32,8 +33,6 @@ from agents.llm_config import load_workflow_config, load_kite_config
 from agents.agent_loader import AgentLoader
 
 KITE_MCP_URL = "https://mcp.kite.trade/mcp"
-HEARTBEAT_LOG_FILE = "screenipy_heartbeat.log"
-RESULTS_DB = "screenipy_agent_results.db"
 
 
 class AgentScheduler:
@@ -42,61 +41,60 @@ class AgentScheduler:
     Reads schedule from screenipy.yaml and runs configured personas.
     """
 
-    def __init__(self, db_path: str = RESULTS_DB):
-        """
-        Initialize the scheduler.
-        
-        Args:
-            db_path: Path to SQLite database for storing scheduled run results
-        """
+    def __init__(self, dsn: Optional[str] = None):
         if not _APSCHEDULER_AVAILABLE:
             raise ImportError(
                 "APScheduler is required. Install with: pip install apscheduler"
             )
 
-        self.db_path = db_path
+        self.dsn = dsn or os.environ.get('DATABASE_URL', '')
+        if not self.dsn:
+            raise ValueError(
+                "DATABASE_URL is not set. "
+                "Provide a dsn= argument or set the DATABASE_URL environment variable."
+            )
         self.scheduler = AsyncIOScheduler()
         self.agent_loader = AgentLoader()
         self._init_db()
 
+    def _get_conn(self):
+        conn = psycopg2.connect(self.dsn, sslmode='require')
+        conn.autocommit = False
+        return conn
+
     def _init_db(self):
-        """Initialize SQLite database for scheduled run results."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_conn()
         try:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS scheduled_runs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_at TEXT NOT NULL,
-                    agent_name TEXT NOT NULL,
-                    query TEXT,
-                    result TEXT,
-                    status TEXT DEFAULT 'pending',
-                    error TEXT
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS heartbeat_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    checked_at TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    status_code INTEGER,
-                    latency_ms REAL,
-                    ok INTEGER DEFAULT 0
-                )
-            """)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS scheduled_runs (
+                        id SERIAL PRIMARY KEY,
+                        run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        agent_name TEXT NOT NULL,
+                        query TEXT,
+                        result TEXT,
+                        status TEXT DEFAULT 'pending',
+                        error TEXT
+                    )
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS heartbeat_log (
+                        id SERIAL PRIMARY KEY,
+                        checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        url TEXT NOT NULL,
+                        status_code INTEGER,
+                        latency_ms REAL,
+                        ok INTEGER DEFAULT 0
+                    )
+                """)
             conn.commit()
         finally:
             conn.close()
 
     def setup_from_config(self):
-        """
-        Set up scheduled jobs from screenipy.yaml.
-        Also adds the heartbeat job.
-        """
         config = load_workflow_config()
         kite_cfg = load_kite_config()
 
-        # Heartbeat job: ping Kite MCP every 5 minutes
         heartbeat_url = kite_cfg.get('url', KITE_MCP_URL)
         self.scheduler.add_job(
             self._heartbeat_job,
@@ -108,7 +106,6 @@ class AgentScheduler:
         )
         logger.info(f"Heartbeat job added for {heartbeat_url}")
 
-        # Add scheduled agent runs from config
         schedules = config.get('schedule', [])
         for i, sched in enumerate(schedules):
             cron_expr = sched.get('cron')
@@ -119,7 +116,6 @@ class AgentScheduler:
                 logger.warning(f"Invalid schedule entry {i}: {sched}")
                 continue
 
-            # Parse cron expression
             cron_parts = cron_expr.strip().split()
             if len(cron_parts) == 5:
                 minute, hour, day, month, day_of_week = cron_parts
@@ -142,7 +138,6 @@ class AgentScheduler:
                 logger.warning(f"Invalid cron expression: {cron_expr}")
 
     async def _heartbeat_job(self, url: str):
-        """Ping the Kite MCP URL and log result."""
         start = datetime.now()
         status_code = None
         ok = False
@@ -158,13 +153,13 @@ class AgentScheduler:
             logger.warning(f"Heartbeat failed for {url}: {e}")
             latency_ms = (datetime.now() - start).total_seconds() * 1000
 
-        # Log to DB
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_conn()
         try:
-            conn.execute(
-                "INSERT INTO heartbeat_log (checked_at, url, status_code, latency_ms, ok) VALUES (?, ?, ?, ?, ?)",
-                (datetime.now().isoformat(), url, status_code, latency_ms, int(ok))
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO heartbeat_log (checked_at, url, status_code, latency_ms, ok) VALUES (NOW(), %s, %s, %s, %s)",
+                    (url, status_code, latency_ms, int(ok))
+                )
             conn.commit()
         finally:
             conn.close()
@@ -173,7 +168,6 @@ class AgentScheduler:
         logger.info(f"Heartbeat {url}: {status_str} ({latency_ms:.0f}ms) {'✓' if ok else '✗'}")
 
     async def _run_scheduled_agent(self, agent_name: str):
-        """Run a scheduled agent persona and save results."""
         logger.info(f"Running scheduled agent: {agent_name}")
         run_at = datetime.now().isoformat()
 
@@ -199,29 +193,26 @@ class AgentScheduler:
             self._save_run_result(run_at, agent_name, None, None, 'error', str(e))
 
     def _save_run_result(self, run_at, agent_name, query, result, status, error):
-        """Save a scheduled run result to SQLite."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_conn()
         try:
-            conn.execute(
-                "INSERT INTO scheduled_runs (run_at, agent_name, query, result, status, error) VALUES (?, ?, ?, ?, ?, ?)",
-                (run_at, agent_name, query, result, status, error)
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO scheduled_runs (run_at, agent_name, query, result, status, error) VALUES (NOW(), %s, %s, %s, %s, %s)",
+                    (agent_name, query, result, status, error)
+                )
             conn.commit()
         finally:
             conn.close()
 
     def start(self):
-        """Start the scheduler (non-blocking for asyncio loops)."""
         self.scheduler.start()
         logger.info("AgentScheduler started.")
 
     def stop(self):
-        """Stop the scheduler gracefully."""
         self.scheduler.shutdown(wait=False)
         logger.info("AgentScheduler stopped.")
 
     def run_forever(self):
-        """Block and run the scheduler (standalone mode)."""
         import asyncio
         loop = asyncio.get_event_loop()
         self.setup_from_config()
