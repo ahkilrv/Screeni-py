@@ -9,7 +9,6 @@ import sys
 import math
 import numpy as np
 import pandas as pd
-import joblib
 import time
 import classes.Utility as Utility
 from copy import copy
@@ -667,17 +666,17 @@ class tools:
         return result_df[::-1]
     
     # Add data to vector database
-    def addVector(self, data, stockCode, daysToLookback):
-        data = data[::-1] # Reinverting preprocessedData for pct_change
+    def addVector(self, data, stockCode, daysToLookback, chroma_client=None):
+        data = data[::-1]
         data = data.pct_change(fill_method=None)
-        # data = data[::-1]     # Do we need to invert again? No we dont - See operation after flatten
         data = data[['Open', 'High', 'Low', 'Close']]
         data = data.reset_index(drop=True)
         data = data.dropna()
         data = data.to_numpy().flatten().tolist()
-        data = data[(-4 * daysToLookback):]     # Keep only OHLC * daysToLookback samples
+        data = data[(-4 * daysToLookback):]
         if len(data) == (4 * daysToLookback):
-            chroma_client = chromadb.PersistentClient(path="./chromadb_store/")
+            if chroma_client is None:
+                chroma_client = chromadb.PersistentClient(path="./chromadb_store/")
             collection = chroma_client.get_or_create_collection(name="nse_stocks")
             collection.upsert(
                 embeddings=[data],

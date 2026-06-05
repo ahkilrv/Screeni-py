@@ -15,10 +15,11 @@ import classes.Utility as Utility
 from classes.ColorText import colorText
 from classes.OtaUpdater import OTAUpdater
 from classes.CandlePatterns import CandlePatterns
-from classes.ParallelProcessing import StockConsumer
+from classes.ParallelProcessing import StockConsumer, screen_one_stock
 from classes.Changelog import VERSION
 from classes.Utility import isDocker, isGui
-from classes.Database import get_dsn
+from classes.Database import get_dsn, ScreeniDatabase
+import gc
 from alive_progress import alive_bar
 import argparse
 import urllib
@@ -65,6 +66,15 @@ vectorSearch = False
 
 CHROMADB_PATH = "chromadb_store/"
 
+# Lazily initialized ChromaDB client (only when vectorSearch is active)
+_chroma_client = None
+
+def _get_chroma_client():
+    global _chroma_client
+    if _chroma_client is None and CHROMA_AVAILABLE:
+        _chroma_client = chromadb.PersistentClient(path=CHROMADB_PATH)
+    return _chroma_client
+
 configManager = ConfigManager.tools()
 fetcher = Fetcher.tools(configManager)
 screener = Screener.tools(configManager)
@@ -75,14 +85,6 @@ try:
     proxyServer = urllib.request.getproxies()['http']
 except KeyError:
     proxyServer = ""
-
-# Clear chromadb store initially
-if CHROMA_AVAILABLE:
-    chroma_client = chromadb.PersistentClient(path=CHROMADB_PATH)
-    try:
-        chroma_client.delete_collection("nse_stocks")
-    except:
-        pass
 
 
 # Manage Execution flow
@@ -358,95 +360,124 @@ def main(testing=False, testBuild=False, downloadOnly=False, execute_inputs:list
                   configManager, fetcher, screener, candlePatterns, stock, newlyListedOnly, downloadOnly, vectorSearch, isDevVersion, backtestDate)
                  for stock in listStockCodes]
 
-        tasks_queue = multiprocessing.JoinableQueue()
-        results_queue = multiprocessing.Queue()
-
         totalConsumers = multiprocessing.cpu_count()
         if configManager.cacheEnabled is True and multiprocessing.cpu_count() > 2:
             totalConsumers -= 1
-        consumers = [StockConsumer(tasks_queue, results_queue, screenCounter, screenResultsCounter, db_dsn, proxyServer, keyboardInterruptEvent)
-                     for _ in range(totalConsumers)]
 
-        for worker in consumers:
-            worker.daemon = True
-            worker.start()
+        # Collect results in plain lists to avoid quadratic pd.concat churn
+        screenResults_list = []
+        saveResults_list = []
 
-        if testing or testBuild:
-            for item in items:
-                tasks_queue.put(item)
-                result = results_queue.get()
-                if result is not None:
-                    screenResults = pd.concat([screenResults, pd.DataFrame([result[0]])], ignore_index=True)
-                    saveResults = pd.concat([saveResults, pd.DataFrame([result[1]])], ignore_index=True)
-                    if testing or (testBuild and len(screenResults) > 2):
+        if totalConsumers <= 1:
+            # ── Sequential path (no fork) — saves ~300 MB on 512 MB Render ──
+            db = ScreeniDatabase(dsn=db_dsn)
+            isTradingTime = Utility.tools.isTradingTime()
+            numStocks, totalStocks = len(items), len(items)
+            bar, spinner = Utility.tools.getProgressbarStyle()
+            with alive_bar(numStocks, bar=bar, spinner=spinner) as progressbar:
+                for idx, item in enumerate(items):
+                    if keyboardInterruptEvent.is_set():
                         break
+                    if testBuild and len(screenResults_list) > 2:
+                        break
+                    result_sd, result_sd2, matched = screen_one_stock(
+                        item, db, screenCounter, screenResultsCounter,
+                        proxyServer, keyboardInterruptEvent, isTradingTime)
+                    if matched:
+                        screenResults_list.append(result_sd)
+                        saveResults_list.append(result_sd2)
+                    os.environ['SCREENIPY_SCREEN_COUNTER'] = str(int((idx + 1) / totalStocks * 100))
+                    progressbar.text(colorText.BOLD + colorText.GREEN +
+                                     f'Found {screenResultsCounter.value} Stocks' + colorText.END)
+                    progressbar()
+                    if idx % 100 == 0 and idx > 0:
+                        gc.collect()
+            screenResults = pd.DataFrame(screenResults_list)
+            saveResults = pd.DataFrame(saveResults_list)
         else:
-            for item in items:
-                tasks_queue.put(item)
-            # Append exit signal for each process indicated by None
-            for _ in range(multiprocessing.cpu_count()):
-                tasks_queue.put(None)
-            try:
-                numStocks, totalStocks = len(listStockCodes), len(listStockCodes)
-                os.environ['SCREENIPY_TOTAL_STOCKS'] = str(totalStocks)
-                print(colorText.END+colorText.BOLD)
-                bar, spinner = Utility.tools.getProgressbarStyle()
-                with alive_bar(numStocks, bar=bar, spinner=spinner) as progressbar:
-                    while numStocks:
-                        result = results_queue.get()
-                        if result is not None:
-                            screenResults = pd.concat([screenResults, pd.DataFrame([result[0]])], ignore_index=True)
-                            saveResults = pd.concat([saveResults, pd.DataFrame([result[1]])], ignore_index=True)
-                        numStocks -= 1
-                        os.environ['SCREENIPY_SCREEN_COUNTER'] = str(int((totalStocks-numStocks)/totalStocks*100))
-                        progressbar.text(colorText.BOLD + colorText.GREEN +
-                                         f'Found {screenResultsCounter.value} Stocks' + colorText.END)
-                        progressbar()
-            except KeyboardInterrupt:
+            # ── Multiprocessing path ──
+            tasks_queue = multiprocessing.JoinableQueue()
+            results_queue = multiprocessing.Queue()
+            consumers = [StockConsumer(tasks_queue, results_queue, screenCounter, screenResultsCounter, db_dsn, proxyServer, keyboardInterruptEvent)
+                         for _ in range(totalConsumers)]
+            for worker in consumers:
+                worker.daemon = True
+                worker.start()
+
+            if testing or testBuild:
+                for item in items:
+                    tasks_queue.put(item)
+                    result = results_queue.get()
+                    if result is not None:
+                        screenResults_list.append(result[0])
+                        saveResults_list.append(result[1])
+                        if testing or (testBuild and len(screenResults_list) > 2):
+                            break
+            else:
+                for item in items:
+                    tasks_queue.put(item)
+                for _ in range(totalConsumers):
+                    tasks_queue.put(None)
                 try:
-                    keyboardInterruptEvent.set()
+                    numStocks, totalStocks = len(listStockCodes), len(listStockCodes)
+                    os.environ['SCREENIPY_TOTAL_STOCKS'] = str(totalStocks)
+                    bar, spinner = Utility.tools.getProgressbarStyle()
+                    with alive_bar(numStocks, bar=bar, spinner=spinner) as progressbar:
+                        while numStocks:
+                            result = results_queue.get()
+                            if result is not None:
+                                screenResults_list.append(result[0])
+                                saveResults_list.append(result[1])
+                            numStocks -= 1
+                            os.environ['SCREENIPY_SCREEN_COUNTER'] = str(int((totalStocks - numStocks) / totalStocks * 100))
+                            progressbar.text(colorText.BOLD + colorText.GREEN +
+                                             f'Found {screenResultsCounter.value} Stocks' + colorText.END)
+                            progressbar()
                 except KeyboardInterrupt:
-                    pass
-                print(colorText.BOLD + colorText.FAIL +
-                      "\n[+] Terminating Script, Please wait..." + colorText.END)
-                for worker in consumers:
+                    try:
+                        keyboardInterruptEvent.set()
+                    except KeyboardInterrupt:
+                        pass
+                    print(colorText.BOLD + colorText.FAIL +
+                          "\n[+] Terminating Script, Please wait..." + colorText.END)
+                    for worker in consumers:
+                        worker.terminate()
+
+            # Cleanup workers
+            for worker in consumers:
+                try:
                     worker.terminate()
-
-        print(colorText.END)
-        # Exit all processes. Without this, it threw error in next screening session
-        for worker in consumers:
-            try:
-                worker.terminate()
-            except OSError as e:
-                if e.winerror == 5:
+                    worker.join(timeout=2)
+                except OSError:
                     pass
+            from queue import Empty
+            while True:
+                try:
+                    _ = tasks_queue.get(False)
+                except Exception:
+                    break
 
-        # Flush the queue so depending processes will end
-        from queue import Empty
-        while True:
-            try:
-                _ = tasks_queue.get(False)
-            except Exception as e:
-                break
+            screenResults = pd.DataFrame(screenResults_list)
+            saveResults = pd.DataFrame(saveResults_list)
 
+        # ChromaDB vector search (only if vectorSearch is a list, i.e. enabled)
         if CHROMA_AVAILABLE and type(vectorSearch) == list and vectorSearch[2]:
-            chroma_client = chromadb.PersistentClient(path=CHROMADB_PATH)
-            collection = chroma_client.get_collection(name="nse_stocks")
-            query_embeddings= collection.get(ids = [stockCode], include=["embeddings"])["embeddings"]
-            results = collection.query(
-                query_embeddings=query_embeddings,
-                n_results=4
-            )['ids'][0]
-            try:
-                results.remove(stockCode)
-            except ValueError:
-                pass
-            matchedScreenResults, matchedSaveResults = pd.DataFrame(columns=screenResults.columns), pd.DataFrame(columns=saveResults.columns)
-            for stk in results:
-                matchedScreenResults = pd.concat([matchedScreenResults, screenResults[screenResults['Stock'].str.contains(stk)]], ignore_index=True)
-                matchedSaveResults = pd.concat([matchedSaveResults, saveResults[saveResults['Stock'].str.contains(stk)]], ignore_index=True)
-            screenResults, saveResults = matchedScreenResults, matchedSaveResults
-            
+            chroma_client = _get_chroma_client()
+            if chroma_client:
+                collection = chroma_client.get_collection(name="nse_stocks")
+                query_embeddings = collection.get(ids=[stockCode], include=["embeddings"])["embeddings"]
+                results = collection.query(query_embeddings=query_embeddings, n_results=4)['ids'][0]
+                try:
+                    results.remove(stockCode)
+                except ValueError:
+                    pass
+                matchedScreenResults = pd.DataFrame(columns=screenResults.columns)
+                matchedSaveResults = pd.DataFrame(columns=saveResults.columns)
+                for stk in results:
+                    matchedScreenResults = pd.concat([matchedScreenResults, screenResults[screenResults['Stock'].str.contains(stk)]], ignore_index=True)
+                    matchedSaveResults = pd.concat([matchedSaveResults, saveResults[saveResults['Stock'].str.contains(stk)]], ignore_index=True)
+                screenResults, saveResults = matchedScreenResults, matchedSaveResults
+
         screenResults.sort_values(by=['Stock'], ascending=True, inplace=True)
         saveResults.sort_values(by=['Stock'], ascending=True, inplace=True)
         screenResults.set_index('Stock', inplace=True)
